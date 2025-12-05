@@ -1,10 +1,6 @@
 package com.rocchio.service;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
 
 import org.apache.commons.math3.linear.RealVector;
@@ -18,30 +14,40 @@ import com.rocchio.tfidf.TFIDF;
 @Service
 public class Recommendation {
     
-    private List<String> books = new ArrayList<>();  // Títulos ou conteúdos dos livros
-    private List<List<String>> tokenizedBooks = new ArrayList<>();  // Livros tokenizados (palavras)
-    private List<RealVector> bookVectors = new ArrayList<>();  // Vetores TF-IDF dos livros
-    private List<String> vocabulary = new ArrayList<>();  // Vocabulário único
+    private List<String> books = new ArrayList<>();
+    private List<List<String>> tokenizedBooks = new ArrayList<>();
+    private List<RealVector> bookVectors = new ArrayList<>();
+    private List<String> vocabulary = new ArrayList<>();
     private LatentSemanticAnalysis lsa = new LatentSemanticAnalysis();
-    private RealVector currentQueryVector;  // Query atual (para feedback iterativo)
-    private boolean useLSA = false;  // Flag para usar LSA ou não
-    private int lsaDimensions = 50;  // Dimensões para redução LSA
+    private RealVector currentQueryVector;
+    private boolean useLSA = false;
+    private int lsaDimensions = 50;
     
     /**
-     * Inicializa o sistema com uma lista de livros
+     * Limpa e tokeniza texto
      */
+    private List<String> cleanAndTokenize(String text) {
+        // Remove pontuação e converte para minúsculas
+        String cleaned = text.toLowerCase()
+            .replaceAll("[^a-záàâãéèêíïóôõöúçñ\\s]", " ") // Mantém letras e espaços
+            .replaceAll("\\s+", " ") // Remove múltiplos espaços
+            .trim();
+        
+        return Arrays.asList(cleaned.split("\\s+"));
+    }
+    
     public void initialize(List<String> bookContents) {
         this.books = new ArrayList<>(bookContents);
         
-        // Tokeniza os livros (divide em palavras)
+        // Tokeniza os livros
         tokenizedBooks = books.stream()
-            .map(content -> Arrays.asList(content.toLowerCase().split("\\s+")))
+            .map(this::cleanAndTokenize)
             .collect(Collectors.toList());
         
         // Cria vocabulário único
         vocabulary = extractVocabulary(tokenizedBooks);
         
-        // Cria vetores TF-IDF para cada livro
+        // Cria vetores TF-IDF
         bookVectors = new ArrayList<>();
         for (List<String> book : tokenizedBooks) {
             RealVector vector = TFIDF.toTFIDFVector(book, tokenizedBooks, vocabulary);
@@ -51,7 +57,6 @@ public class Recommendation {
         // Treina LSA se habilitado
         if (useLSA) {
             lsa.train(bookVectors, lsaDimensions);
-            // Transforma todos os vetores para o espaço reduzido
             List<RealVector> reducedVectors = new ArrayList<>();
             for (RealVector vector : bookVectors) {
                 reducedVectors.add(lsa.transform(vector));
@@ -60,9 +65,6 @@ public class Recommendation {
         }
     }
     
-    /**
-     * Extrai vocabulário único de todos os livros
-     */
     private List<String> extractVocabulary(List<List<String>> docs) {
         Set<String> vocabSet = new HashSet<>();
         for (List<String> doc : docs) {
@@ -71,12 +73,16 @@ public class Recommendation {
         return new ArrayList<>(vocabSet);
     }
     
-    /**
-     * Recomenda livros baseado em uma query textual
-     */
     public List<RecommendationResult> recommend(String queryText, int topN) {
-        // Converte query para vetor
-        List<String> queryTokens = Arrays.asList(queryText.toLowerCase().split("\\s+"));
+        // Limpa e tokeniza a query
+        List<String> queryTokens = cleanAndTokenize(queryText);
+        
+        // Verifica se a query tem termos
+        if (queryTokens.isEmpty() || queryTokens.get(0).isEmpty()) {
+            return new ArrayList<>();
+        }
+        
+        // Cria vetor TF-IDF para a query
         RealVector queryVector = TFIDF.toTFIDFVector(queryTokens, tokenizedBooks, vocabulary);
         
         // Aplica LSA se habilitado
@@ -86,23 +92,22 @@ public class Recommendation {
         
         currentQueryVector = queryVector;
         
-        // Calcula similaridade com todos os livros
+        // Calcula similaridade
         List<RecommendationResult> results = new ArrayList<>();
         for (int i = 0; i < books.size(); i++) {
             double similarity = CosineSimilarity.cosineSimilarity(queryVector, bookVectors.get(i));
             results.add(new RecommendationResult(books.get(i), similarity, i));
         }
         
-        // Ordena por similaridade (maior primeiro)
+        // Ordena por similaridade
         results.sort((a, b) -> Double.compare(b.getScore(), a.getScore()));
         
         // Retorna top N
-        return results.stream().limit(topN).collect(Collectors.toList());
+        return results.stream()
+            .limit(Math.min(topN, results.size()))
+            .collect(Collectors.toList());
     }
     
-    /**
-     * Refina recomendações com feedback (algoritmo de Rocchio)
-     */
     public List<RecommendationResult> refineWithFeedback(
             List<Integer> relevantBookIndices, 
             List<Integer> nonRelevantBookIndices) {
@@ -111,50 +116,50 @@ public class Recommendation {
             throw new IllegalStateException("Execute uma busca primeiro antes de refinar");
         }
         
-        // Converte índices para vetores
-        List<RealVector> relevantDocs = relevantBookIndices.stream()
+        // Filtra índices válidos
+        List<Integer> validRelevant = relevantBookIndices.stream()
+            .filter(idx -> idx >= 0 && idx < bookVectors.size())
+            .collect(Collectors.toList());
+        
+        List<Integer> validNonRelevant = nonRelevantBookIndices.stream()
+            .filter(idx -> idx >= 0 && idx < bookVectors.size())
+            .collect(Collectors.toList());
+        
+        // Converte para vetores
+        List<RealVector> relevantDocs = validRelevant.stream()
             .map(bookVectors::get)
             .collect(Collectors.toList());
         
-        List<RealVector> nonRelevantDocs = nonRelevantBookIndices.stream()
+        List<RealVector> nonRelevantDocs = validNonRelevant.stream()
             .map(bookVectors::get)
             .collect(Collectors.toList());
         
-        // Aplica Rocchio para otimizar a query
+        // Aplica Rocchio
         RealVector optimizedQuery = RocchioAlgorithm.optimizeQuery(
             currentQueryVector, relevantDocs, nonRelevantDocs);
         
         currentQueryVector = optimizedQuery;
         
-        // Recalcula similaridades com a nova query
+        // Recalcula similaridades
         List<RecommendationResult> results = new ArrayList<>();
         for (int i = 0; i < books.size(); i++) {
             double similarity = CosineSimilarity.cosineSimilarity(optimizedQuery, bookVectors.get(i));
             results.add(new RecommendationResult(books.get(i), similarity, i));
         }
         
-        // Ordena por similaridade
         results.sort((a, b) -> Double.compare(b.getScore(), a.getScore()));
-        
         return results;
     }
     
-    /**
-     * Habilita/desabilita LSA
-     */
     public void setUseLSA(boolean useLSA, int dimensions) {
         this.useLSA = useLSA;
         this.lsaDimensions = dimensions;
         
-        // Re-inicializa se já tiver dados
         if (!books.isEmpty()) {
             initialize(books);
         }
     }
     
-    /**
-     * Classe para representar um resultado de recomendação
-     */
     public static class RecommendationResult {
         private String bookTitle;
         private double score;
@@ -166,7 +171,6 @@ public class Recommendation {
             this.index = index;
         }
         
-        // Getters e Setters
         public String getBookTitle() { return bookTitle; }
         public double getScore() { return score; }
         public int getIndex() { return index; }
